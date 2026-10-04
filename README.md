@@ -48,11 +48,11 @@
 
 **AURA** (Automated Urban Risk Analytics) is a natural-language analytics tool for urban safety data. You type a question the way you'd ask a friend — *"which grocery stores sit in the most dangerous ZIP codes?"* — and AURA does three things:
 
-1. **Translates** your question into a single, valid Databricks SQL `SELECT` statement using a schema-aware prompt.
+1. **Plans** your question as a structured dataset, ranking, and supported filters. The server validates that plan and builds a parameterized `SELECT` from fixed templates.
 2. **Runs** that query against a Databricks SQL warehouse holding crime, census, vulnerability, and food-access data for the Phoenix metro area.
 3. **Explains** the result in plain English and plots the relevant ZIP codes on a live map — no dashboards to learn, no SQL to write.
 
-It covers **320+ Phoenix-metro ZIP codes** across **six indexed tables**, and it is deliberately read-only: AURA can answer questions about the data, but it can never change it.
+It covers **320+ Phoenix-metro ZIP codes** across **six indexed tables**. The public interface remains visible; paid AI and warehouse queries require private owner access. The query builder only emits reads from those six datasets. A dedicated Databricks principal with SELECT-only grants is still required to enforce the same boundary in the warehouse.
 
 > AURA is experimental research software. Risk scores are statistical approximations — not a basis for law enforcement, policy, or operational decisions. The app says so on the way in, and so do I.
 
@@ -70,49 +70,51 @@ The Phoenix metro area was a good testbed: rich open data, real variation betwee
 
 ## Ask it things like this
 
-These run on the live app today:
+Examples supported by the query planner after unlocking Owner access:
 
 - *Which grocery stores are in the most dangerous ZIP codes?*
 - *Show the top 5 highest-risk locations in Phoenix.*
-- *Which areas have the lowest crime for safe transit?*
+- *Which ZIP codes have the lowest crime per resident?*
 - *Find stores with high population but low crime scores.*
-- *Compare crime density across different ZIP codes.*
-- *Which corridors need immediate safety infrastructure?*
+- *Rank ZIP codes by crime density.*
+- *Which census tracts have the highest social vulnerability?*
 
 Each one returns ranked result cards, the underlying ZIPs pinned on a map, and a short written read on what it means.
 
-> **Heads up:** the very first query of a session can take a few seconds — the Databricks warehouse spins up cold, and AURA retries automatically while it warms.
+> The planner supports single-dataset rankings, exact city filters where available, ZIP filters, and population ranges, with up to 20 results. Joins, arbitrary calculations, and SQL supplied by the user or model are not supported. A cold warehouse may need to warm up before a query succeeds.
 
 ---
 
 ## How it works
 
-A question makes one round trip through a single API route. The model writes the SQL, a guard checks it, Databricks runs it, and the model summarizes what came back.
+A question makes one round trip through a single API route. Authentication, origin, and bounded JSON validation run before any paid call. The model proposes structured intent; the server validates every field and constructs SQL from fixed identifiers and bound values.
 
 ```mermaid
 flowchart TD
     U["User · plain-English question"] --> FE["Next.js UI<br/>LandingPage.tsx"]
     FE -->|POST /api/query| API["API route<br/>app/api/query/route.ts"]
-    API --> GEN["generateSQL()<br/>OpenAI GPT-4o-mini · temp 0"]
+    API --> AUTH{"Owner session, same origin,<br/>bounded JSON question"}
+    AUTH -->|valid| GEN["generateQuery()<br/>OpenAI structured plan · temp 0"]
+    AUTH -->|invalid| DENY["Rejected before providers"]
     GEN --> SCHEMA[("Schema prompt<br/>6 urban_ai tables")]
-    GEN --> GUARD{"SELECT-only<br/>guard"}
-    GUARD -->|mutation detected| ERR["403 · rejected"]
-    GUARD -->|clean| DBX["runQuery()<br/>Databricks SQL · up to 3× warm-up retry"]
+    GEN --> GUARD{"Exact dataset / sort / filter validation"}
+    GUARD -->|unsupported| ERR["Safe failure"]
+    GUARD -->|valid| DBX["Server-owned parameterized SELECT<br/>Databricks · 25s deadline · 20-row cap"]
     DBX --> NORM["normalizeResults()<br/>unify 6 schemas into one card shape"]
     NORM --> EXP["generateExplanation()<br/>OpenAI GPT-4o-mini · temp 0.35"]
-    EXP --> RESP["JSON · { sql, results, answer }"]
+    EXP --> RESP["No-store JSON · { results, answer }"]
     RESP --> FE
     FE --> CARDS["Ranked result cards · 0–100 score"]
     FE --> MAP["Leaflet map · Phoenix ZIP markers"]
 ```
 
-The whole thing is stateless. Nothing about your question is stored — it's generated, run, explained, and forgotten.
+The app has no question-history database and does not log questions, generated SQL, or model output. Questions and a limited result preview are sent to OpenAI, and SQL with bound filters is sent to Databricks. Those providers and hosting infrastructure can retain data according to their account settings; app-side non-persistence is not a promise of zero provider retention.
 
 ---
 
 ## The request lifecycle
 
-Here's the same flow as a timeline, including the two places I lean on the model and the safety check in between.
+The model is used twice: once to plan the query, then to explain the bounded results.
 
 ```mermaid
 sequenceDiagram
@@ -120,27 +122,26 @@ sequenceDiagram
     participant UI as Next.js UI
     participant API as /api/query
     participant AI as OpenAI GPT-4o-mini
-    participant Guard as SELECT guard
+    participant Guard as Plan validator / SQL builder
     participant DBX as Databricks SQL
 
     User->>UI: "Which stores sit in the most dangerous ZIPs?"
     UI->>API: POST { question }
-    API->>AI: generateSQL(question) + full schema prompt
-    AI-->>API: SELECT ... FROM urban_ai.grocery_safety_index ...
-    API->>Guard: inspect the statement
-    Guard-->>API: starts with SELECT, no DML/DDL, allow
-    loop up to 3x while warehouse warms
-        API->>DBX: execute SQL
-        DBX-->>API: rows
-    end
+    API->>API: check owner session, origin, and input bounds
+    API->>AI: generateQuery(question) + structured response schema
+    AI-->>API: dataset, ranking, limit, supported filters
+    API->>Guard: validate exact enums, fields, types, limits
+    Guard-->>API: server-owned SQL + named parameters
+    API->>DBX: set statement timeout, execute approved query
+    DBX-->>API: at most 20 bounded rows
     API->>API: normalizeResults(rows)
     API->>AI: generateExplanation(question, rows) at temp 0.35
     AI-->>API: plain-English answer
-    API-->>UI: { sql, results, answer }
+    API-->>UI: { results, answer }, Cache-Control: no-store
     UI-->>User: cards + map markers + explanation
 ```
 
-Two guards, not one: the SQL generator refuses to emit anything but a `SELECT` (and throws if it sees `DROP`, `DELETE`, `INSERT`, `UPDATE`, `ALTER`, or `CREATE`), and the API route independently re-checks that the final statement still starts with `SELECT` before it ever touches Databricks. If either fails, the request dies with a `403`.
+Model-generated SQL is never executed. Catalog, schema, tables, columns, sort expressions, and comparison operators come from server code. City names, ZIPs, population ranges, and the row limit are passed as named parameters. Unsupported datasets, fields, extra properties, and result limits fail validation.
 
 ---
 
@@ -209,13 +210,12 @@ The map isn't decorative: AURA carries a lookup of ~150 Phoenix-metro ZIP centro
 
 | Decision | Why |
 |---|---|
-| **Schema lives in the prompt, not in code** | The model gets the exact tables, columns, ranges, and "use this table when…" routing as a system prompt. Adding a dataset means editing one schema file, not rewriting query logic. |
-| **`temperature: 0` for SQL, `0.35` for the explanation** | SQL has to be deterministic and correct; the human-facing summary is allowed a little warmth so it doesn't read like a robot. |
-| **Two independent SELECT guards** | One inside the SQL generator, one in the API route. A single check is a single point of failure; defense in depth costs nothing here. |
-| **3× retry on the warehouse** | Serverless Databricks warehouses sleep to save cost and wake slowly. Rather than fail the first query of a session, AURA retries with a 2.5s backoff while the cluster spins up. |
-| **A fresh Databricks client per request** | The client is created and fully torn down (operation → session → client) inside each call, so sessions never leak and idle compute is released. |
+| **Schema-aware structured intent** | The model can choose only a supported dataset and bounded filters; server templates own the actual SQL. Adding a dataset requires both prompt metadata and an approved template. |
+| **Private paid execution** | A random owner access code creates a signed one-hour HttpOnly session. Authorization and same-origin checks run before reading query bodies or contacting providers. Missing configuration fails closed. |
+| **Bounded provider work** | Model outputs have token caps and no automatic retries. Warehouse execution has a 25-second statement timeout, a 20-row result cap, and bounded result validation. |
+| **A fresh Databricks client per request** | Operation, session, and client teardown are attempted within bounded deadlines. Late handles are closed if a request has already timed out. |
 | **One normalizer, six schemas** | `normalizeResults()` detects which table a row came from and maps it onto a single card shape, so the frontend only ever renders one thing. |
-| **No JOINs, no subqueries** | The prompt forbids them. Each question maps to exactly one table — simpler to reason about, far harder for the model to get wrong. |
+| **No JOINs, no subqueries** | Server-owned templates have no joins, subqueries, model-generated expressions, or arbitrary functions. |
 
 ---
 
@@ -226,7 +226,7 @@ The map isn't decorative: AURA carries a lookup of ~150 Phoenix-metro ZIP centro
 | Framework | Next.js 16 (App Router) + React 19 |
 | Language | TypeScript |
 | Styling / motion | Tailwind CSS v4, Framer Motion (`motion`) |
-| Maps | Leaflet + react-leaflet, Mapbox GL |
+| Maps | Bundled Leaflet |
 | AI | OpenAI GPT-4o-mini |
 | Data warehouse | Databricks SQL (`@databricks/sql`) |
 | Icons | lucide-react |
@@ -239,7 +239,8 @@ The map isn't decorative: AURA carries a lookup of ~150 Phoenix-metro ZIP centro
 ```text
 urban-ai-agent/
 ├── app/
-│   ├── api/query/route.ts     # the one endpoint: NL -> SQL -> guard -> run -> explain
+│   ├── api/query/route.ts     # authorize -> validate -> plan -> compile -> run -> explain
+│   ├── api/owner-session/    # private one-hour owner sessions
 │   ├── layout.tsx             # metadata, fonts
 │   └── page.tsx               # renders <LandingPage />
 ├── src/
@@ -247,9 +248,13 @@ urban-ai-agent/
 │   │   ├── LandingPage.tsx    # boot -> disclaimer -> app state machine
 │   │   └── ui/                # navbar, hero shader, bento grid, map, chat, dock, footer
 │   └── lib/
-│       ├── openai.ts          # generateSQL, generateExplanation, normalizeResults
+│       ├── openai.ts          # structured plan, explanation, normalization
 │       ├── databricks.ts      # connect, run, tear down per request
-│       ├── prompts.ts         # the SQL + explanation system prompts
+│       ├── owner-auth.ts      # server-only authentication and signed sessions
+│       ├── query-plan.ts      # fixed SQL templates and bound filters
+│       ├── request-validation.ts # bounded JSON input
+│       ├── map-popup.ts       # text-only popup DOM
+│       ├── prompts.ts         # planner + explanation prompts
 │       ├── schema.ts          # the six-table schema the model reads
 │       └── types.ts
 ├── public/                    # video background, icons
@@ -260,10 +265,10 @@ urban-ai-agent/
 
 ## Run it locally
 
-You'll need a Databricks SQL warehouse and an OpenAI API key.
+You'll need Node.js 20 or newer, a Databricks SQL warehouse, an OpenAI API key, and a cryptographically random owner access code.
 
 ```bash
-git clone https://github.com/SikeTheMike/urban-ai-agent.git
+git clone https://github.com/zshah101/urban-ai-agent.git
 cd urban-ai-agent
 npm install
 ```
@@ -275,6 +280,8 @@ OPENAI_API_KEY=sk-...
 DATABRICKS_HOST=your-workspace.cloud.databricks.com
 DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/xxxxxxxxxxxx
 DATABRICKS_TOKEN=dapi-...
+# Generate a random value of at least 32 URL-safe characters. Never commit it.
+AI_OWNER_ACCESS_CODE=replace-with-a-cryptographically-random-value
 ```
 
 Then:
@@ -283,9 +290,9 @@ Then:
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000). The `.env.local` is git-ignored — keys never leave your machine.
+Open [http://localhost:3000](http://localhost:3000) and use **Owner access** above the terminal. The placeholder access code is deliberately rejected. Keep credentials in `.env.local` locally and server-only environment variables when deploying; never prefix them with `NEXT_PUBLIC_`. Provider keys stay out of browser code, but are sent to the configured provider over HTTPS when authenticating server requests.
 
-> AURA expects the six tables above to already exist under an `urban_ai` schema in your Databricks workspace. Point it at your own warehouse and adjust `src/lib/schema.ts` to match your columns.
+> AURA expects the six tables above under `workspace.urban_ai`. Update both `src/lib/schema.ts` and the approved templates in `src/lib/query-plan.ts` when changing the schema. Give a dedicated service principal SELECT access only to those public-data tables/views. Configure provider spending limits, warehouse auto-stop/size, and deployment protection for old preview deployments separately; private app access is not a distributed cost quota.
 
 ---
 
@@ -293,8 +300,11 @@ Open [http://localhost:3000](http://localhost:3000). The `.env.local` is git-ign
 
 This is a tool that talks about crime and vulnerability, so the guardrails aren't an afterthought:
 
-- **Read-only by construction** — two layers reject anything that isn't a `SELECT`. AURA cannot write, modify, or drop data even if the model tried.
-- **No query persistence** — questions are processed in real time and never stored.
+- **Private AI access** — signed, expiring owner cookies; no access-code storage in browser storage or URLs.
+- **Approved SQL templates** — six datasets, fixed identifiers, named parameters, and enforced result limits. Warehouse permissions remain a separate required boundary.
+- **Privacy-aware processing** — no application query/output logs or history database; provider and hosting retention still depends on account settings.
+- **Text-only map popups** — returned strings are displayed through DOM text nodes. Leaflet is bundled with the app instead of loaded as a remote script.
+- **Offline verification** — `npm run test:security` uses provider stubs to exercise authorization, planner validation, bounded cleanup, safe errors, and popup handling without real credentials or paid requests.
 - **An honest front door** — the app opens with a disclaimer that says, plainly, that it's experimental and *not* for law enforcement, policy decisions, or public-safety determinations. I'd rather under-promise.
 
 ---

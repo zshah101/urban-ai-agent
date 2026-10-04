@@ -1,7 +1,7 @@
 "use client";
 
-import React, { PropsWithChildren, useRef } from "react";
-import { motion, useMotionValue, useSpring, useTransform } from "motion/react";
+import React, { useRef } from "react";
+import { motion, useMotionValue, useSpring, useTransform, type MotionValue } from "motion/react";
 import { cn } from "../../lib/utils";
 
 const DEFAULT_MAGNIFICATION = 60;
@@ -33,10 +33,8 @@ const Dock = React.forwardRef<HTMLDivElement, DockProps>(
 
     const renderChildren = () => {
       return React.Children.map(children, (child) => {
-        if (React.isValidElement(child) && child.type === DockIcon) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        if (React.isValidElement<DockIconProps>(child) && child.type === DockIcon) {
           return React.cloneElement(child, {
-            ...(child.props as any),
             mouseX: mouseX,
             magnification: magnification,
             distance: distance,
@@ -69,14 +67,14 @@ export interface DockIconProps {
   size?: number;
   magnification?: number;
   distance?: number;
-  mouseX?: any;
+  mouseX?: MotionValue<number>;
   className?: string;
   children?: React.ReactNode;
   onClick?: () => void;
 }
 
 const DockIcon = ({
-  size,
+  size = 40,
   magnification = DEFAULT_MAGNIFICATION,
   distance = DEFAULT_DISTANCE,
   mouseX,
@@ -85,8 +83,9 @@ const DockIcon = ({
   onClick,
 }: DockIconProps) => {
   const ref = useRef<HTMLDivElement>(null);
+  const fallbackMouseX = useMotionValue(Infinity);
 
-  const distanceCalc = useTransform(mouseX, (val: number) => {
+  const distanceCalc = useTransform(mouseX ?? fallbackMouseX, (val: number) => {
     const bounds = ref.current?.getBoundingClientRect() ?? { x: 0, width: 0 };
     return val - bounds.x - bounds.width / 2;
   });
@@ -94,7 +93,7 @@ const DockIcon = ({
   const widthSync = useTransform(
     distanceCalc,
     [-distance, 0, distance],
-    [40, magnification, 40]
+    [size, magnification, size]
   );
 
   const width = useSpring(widthSync, {

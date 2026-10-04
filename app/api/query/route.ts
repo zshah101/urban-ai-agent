@@ -1,50 +1,27 @@
 import { NextResponse } from "next/server";
-import { generateSQL, generateExplanation, normalizeResults } from "@/src/lib/openai";
+import { generateQuery, generateExplanation, normalizeResults } from "@/src/lib/openai";
 import { runQuery } from "@/src/lib/databricks";
+import { requireOwner, requireSameOrigin } from "@/src/lib/owner-auth";
+import { readQuestion, RequestValidationError } from "@/src/lib/request-validation";
 
-export async function POST(req: Request) {
+export const runtime = "nodejs";
+export const maxDuration = 60;
+
+export async function POST(request: Request) {
   try {
-    const { question } = await req.json();
-
-    if (!question) {
-      return NextResponse.json({ error: "Question required" }, { status: 400 });
+    // Authorize before reading the request body or spending any provider credits.
+    requireOwner(request);
+    requireSameOrigin(request);
+    const question = await readQuestion(request);
+    const signal = AbortSignal.any([request.signal, AbortSignal.timeout(55_000)]);
+    const query = await generateQuery(question, signal);
+    const results = normalizeResults(await runQuery(query, signal));
+    const answer = await generateExplanation(question, results, signal);
+    return NextResponse.json({ results, answer }, { headers: { "Cache-Control": "no-store" } });
+  } catch (error) {
+    if (error instanceof RequestValidationError) {
+      return NextResponse.json({ error: error.message }, { status: error.status, headers: { "Cache-Control": "no-store" } });
     }
-
-    // 1. Generate SQL from natural language
-    const sql = await generateSQL(question);
-
-    // 2. Security double-check
-    if (!sql.trim().toUpperCase().startsWith("SELECT")) {
-      return NextResponse.json({ error: "Only SELECT queries are allowed." }, { status: 403 });
-    }
-
-    // 3. Run against Databricks (retry up to 3x for warehouse warm-up)
-    let rawResults: any[] | undefined;
-    let lastError: any;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        rawResults = await runQuery(sql) as any[];
-        break;
-      } catch (err) {
-        lastError = err;
-        if (attempt < 2) await new Promise(r => setTimeout(r, 2500));
-      }
-    }
-    if (rawResults === undefined) throw lastError;
-
-    // 4. Normalize into consistent card format
-    const results = normalizeResults(rawResults!);
-
-    // 5. Generate plain-English explanation
-    const answer = await generateExplanation(question, results);
-
-    return NextResponse.json({ sql, results, answer });
-
-  } catch (error: any) {
-    console.error("API Error:", error);
-    return NextResponse.json(
-      { error: error?.message ?? "Query failed or database connection error" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Query unavailable. Try a supported city, ZIP, or ranking question." }, { status: 502, headers: { "Cache-Control": "no-store" } });
   }
 }

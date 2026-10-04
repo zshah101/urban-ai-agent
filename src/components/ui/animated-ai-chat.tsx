@@ -7,8 +7,6 @@ import {
   AlertTriangle,
   BarChart3,
   TrendingUp,
-  ArrowUpIcon,
-  Paperclip,
   XIcon,
   LoaderIcon,
   SendIcon,
@@ -107,10 +105,10 @@ export function AnimatedAIChat() {
   const [value, setValue] = useState("");
   const [attachments, setAttachments] = useState<string[]>([]);
   const [isTyping, setIsTyping] = useState(false);
-  const [isPending, startTransition] = useTransition();
+  const [, startTransition] = useTransition();
   const [activeSuggestion, setActiveSuggestion] = useState<number>(-1);
   const [showCommandPalette, setShowCommandPalette] = useState(false);
-  const [recentCommand, setRecentCommand] = useState<string | null>(null);
+  const [, setRecentCommand] = useState<string | null>(null);
   const [mousePosition, setMousePosition] = useState({ x: 0, y: 0 });
   const { textareaRef, adjustHeight } = useAutoResizeTextarea({ minHeight: 60, maxHeight: 200 });
   const [inputFocused, setInputFocused] = useState(false);
@@ -143,15 +141,16 @@ export function AnimatedAIChat() {
     },
   ];
 
-  useEffect(() => {
-    if (value.startsWith("/") && !value.includes(" ")) {
+  function updateValue(next: string) {
+    setValue(next);
+    if (next.startsWith("/") && !next.includes(" ")) {
       setShowCommandPalette(true);
-      const idx = commandSuggestions.findIndex((cmd) => cmd.prefix.startsWith(value));
+      const idx = commandSuggestions.findIndex((cmd) => cmd.prefix.startsWith(next));
       setActiveSuggestion(idx >= 0 ? idx : -1);
     } else {
       setShowCommandPalette(false);
     }
-  }, [value]);
+  }
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => setMousePosition({ x: e.clientX, y: e.clientY });
@@ -187,7 +186,7 @@ export function AnimatedAIChat() {
         e.preventDefault();
         if (activeSuggestion >= 0) {
           const selected = commandSuggestions[activeSuggestion];
-          setValue(selected.prefix + " ");
+          updateValue(selected.prefix + " ");
           setShowCommandPalette(false);
           setRecentCommand(selected.label);
           setTimeout(() => setRecentCommand(null), 3500);
@@ -208,7 +207,7 @@ export function AnimatedAIChat() {
         setIsTyping(true);
         setTimeout(() => {
           setIsTyping(false);
-          setValue("");
+          updateValue("");
           adjustHeight(true);
         }, 3000);
       });
@@ -217,7 +216,7 @@ export function AnimatedAIChat() {
 
   const selectCommandSuggestion = (index: number) => {
     const selected = commandSuggestions[index];
-    setValue(selected.prefix + " ");
+    updateValue(selected.prefix + " ");
     setShowCommandPalette(false);
     setRecentCommand(selected.label);
     setTimeout(() => setRecentCommand(null), 2000);
@@ -287,7 +286,7 @@ export function AnimatedAIChat() {
                 ref={textareaRef}
                 value={value}
                 onChange={(e) => {
-                  setValue(e.target.value);
+                  updateValue(e.target.value);
                   adjustHeight();
                 }}
                 onKeyDown={handleKeyDown}

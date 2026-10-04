@@ -11,6 +11,8 @@ import { AlertCard }        from "./ui/alert-card";
 import { Dock, DockIcon }   from "./ui/dock";
 import { Footer }           from "./ui/footer";
 import { GlobalShader }     from "./ui/global-shader";
+import { buildMapPopup } from "../lib/map-popup";
+import { OwnerAccess } from "./ui/owner-access";
 import {
   Home, BarChart3, MapPin, Terminal, Zap, Shield, Database,
   TrendingUp, AlertTriangle, Search, Twitter, Linkedin, Github, Mail, Globe,
@@ -104,23 +106,23 @@ const DISCLAIMER_ITEMS = [
 const EXAMPLE_QUERIES = [
   "Which grocery stores are in the most dangerous ZIP codes?",
   "Show the top 5 highest risk locations in Phoenix",
-  "Which areas have the lowest crime for safe transit?",
+  "Which ZIP codes have the lowest crime per resident?",
   "Find stores with high population but low crime scores",
-  "Compare crime density across different ZIP codes",
-  "Which corridors need immediate safety infrastructure?",
+  "Rank ZIP codes by crime density",
+  "Which census tracts have the highest social vulnerability?",
 ];
 
 const PLACEHOLDER_QUERIES = [
   "Which ZIP codes have the highest crime density?",
   "Show top 5 most dangerous areas in Phoenix...",
   "Which grocery stores are in safe zones?",
-  "Compare risk scores across neighborhoods...",
+  "Rank ZIP codes by urban risk...",
 ];
 
 const FAQ_ITEMS = [
   {
     q: "How does AURA generate answers from plain English?",
-    a: "AURA passes your query to GPT-4o, which generates precise SQL, executes it against our Databricks cluster (847K+ indexed records), then returns a plain-English analysis alongside the raw data results.",
+    a: "After unlocking Owner access, GPT-4o-mini proposes a structured query plan. AURA validates the dataset and filters, builds a fixed SELECT template with bound parameters, and retrieves up to 20 rows from Databricks. The model then explains those results in plain English.",
   },
   {
     q: "What data sources does AURA use?",
@@ -128,7 +130,7 @@ const FAQ_ITEMS = [
   },
   {
     q: "Is my query data stored or shared?",
-    a: "No. Queries are processed in real-time and not stored. AURA enforces SELECT-only database guardrails — no data is ever written, modified, or retained from your session.",
+    a: "AURA does not save query history or log questions and answers. Questions and a limited result preview are sent to OpenAI; SQL and bound filters are sent to Databricks. Provider and hosting retention depends on your account settings. AI execution is private through Owner access.",
   },
   {
     q: "Can I trust the risk scores for real decisions?",
@@ -141,12 +143,12 @@ const FAQ_ITEMS = [
 const featureItems: BentoItem[] = [
   {
     title: "AI Risk Scoring Engine",
-    meta: "GPT-4o",
+    meta: "GPT-4o-mini",
     description:
-      "Natural language queries powered by GPT-4o translate into precise SQL against 847K+ crime records. Ask anything about Phoenix safety.",
+      "GPT-4o-mini plans rankings across six urban datasets. The server validates each plan and builds bounded queries; private Owner access unlocks execution.",
     icon: <TrendingUp className="w-4 h-4 text-amber-400" />,
     status: "Live",
-    tags: ["AI", "GPT-4o", "NLP"],
+    tags: ["AI", "GPT-4o-mini", "NLP"],
     colSpan: 2,
     hasPersistentHover: true,
     cta: "Try it →",
@@ -162,12 +164,12 @@ const featureItems: BentoItem[] = [
     cta: "Explore →",
   },
   {
-    title: "SELECT-Only Guardrails",
-    meta: "Read-only",
+    title: "Validated SELECT Templates",
+    meta: "6 datasets",
     description:
-      "Your queries never mutate data. Hard-enforced SELECT-only constraints protect the integrity of all 847K records.",
+      "Fixed table and column allowlists, named parameters, and a 20-row cap keep model-generated SQL out of execution. Paid queries require Owner access.",
     icon: <Shield className="w-4 h-4 text-purple-400" />,
-    status: "Secured",
+    status: "Protected",
     tags: ["Security", "SQL"],
     cta: "Learn more →",
   },
@@ -387,7 +389,7 @@ function LightningHero() {
       <div className="absolute inset-0 z-[6] hidden sm:block">
         <FeatureItem name="847K+ Records" value="Phoenix Metro"  position="left-4 sm:left-12 top-[44%]" />
         <FeatureItem name="GPT-4o"        value="AI Engine"      position="left-[22%] top-[33%]"         />
-        <FeatureItem name="SELECT-Only"   value="Zero Write Risk" position="right-[22%] top-[33%]"       />
+        <FeatureItem name="Validated SQL" value="SELECT Templates" position="right-[22%] top-[33%]"      />
         <FeatureItem name="Databricks"    value="Sub-second"     position="right-4 sm:right-12 top-[44%]" />
       </div>
 
@@ -926,26 +928,24 @@ function QueryTerminal({
 }
 
 /* ════════════════════════════════════════════════════════════
-   RISK MAP — conditional, Leaflet CDN
+   RISK MAP — conditional, bundled Leaflet
 ════════════════════════════════════════════════════════════ */
 function RiskMapSection({ mapResults }: { mapResults: QueryResult[] }) {
   const mapContainerRef = useRef<HTMLDivElement>(null);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const leafletRef = useRef<any>(null);
+  const leafletRef = useRef<import("leaflet").Map | null>(null);
 
   useEffect(() => {
     if (!mapResults.length) return;
 
-    const init = () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const L = (window as any).L;
-      if (!mapContainerRef.current || !L) return;
+    let canceled = false;
+    const init = (L: typeof import("leaflet")) => {
+      if (canceled || !mapContainerRef.current) return;
       if (leafletRef.current) { leafletRef.current.remove(); leafletRef.current = null; }
 
       if (!document.getElementById("aura-map-styles")) {
         const s = document.createElement("style");
         s.id = "aura-map-styles";
-        s.innerHTML = `
+        s.textContent = `
           @keyframes aura-pulse{0%,100%{transform:scale(1);opacity:.5}50%{transform:scale(1.7);opacity:0}}
           .aura-ring{animation:aura-pulse 2s ease-in-out infinite}
           .leaflet-popup-content-wrapper{background:transparent!important;border:none!important;box-shadow:none!important;padding:0!important}
@@ -965,7 +965,6 @@ function RiskMapSection({ mapResults }: { mapResults: QueryResult[] }) {
         if (!coords) return;
         const score = r.priority_score ?? 0;
         const color = score >= 50 ? "#f87171" : score >= 20 ? "#fbbf24" : "#34d399";
-        const level = score >= 50 ? "CRITICAL" : score >= 20 ? "ELEVATED" : "NOMINAL";
 
         const icon = L.divIcon({
           className: "",
@@ -977,16 +976,7 @@ function RiskMapSection({ mapResults }: { mapResults: QueryResult[] }) {
           iconAnchor: [10, 10],
         });
 
-        L.marker(coords, { icon }).addTo(map).bindPopup(
-          `<div style="background:#070d08;color:#fff;border:1px solid rgba(245,158,11,.15);border-radius:14px;padding:14px 16px;min-width:168px;font-family:monospace;font-size:12px">
-            <div style="color:${color};font-size:9px;font-weight:700;letter-spacing:.1em;margin-bottom:6px">${level}</div>
-            <div style="font-size:13px;font-weight:600;margin-bottom:2px">${r.store_name || `ZIP ${r.zip_code}`}</div>
-            <div style="color:rgba(255,255,255,.35);font-size:11px;margin-bottom:8px">${r.city || ""} · ${r.zip_code || ""}</div>
-            <div style="color:rgba(255,255,255,.35);margin-bottom:2px">Crimes: <span style="color:#f87171">${r.total_crimes?.toLocaleString() ?? "—"}</span></div>
-            <div style="color:rgba(255,255,255,.35)">Risk: <span style="color:${color};font-weight:700">${score}/100</span></div>
-          </div>`,
-          { className: "" }
-        );
+        L.marker(coords, { icon }).addTo(map).bindPopup(buildMapPopup(r), { className: "" });
         bounds.push(coords);
       });
 
@@ -994,20 +984,10 @@ function RiskMapSection({ mapResults }: { mapResults: QueryResult[] }) {
       leafletRef.current = map;
     };
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    if ((window as any).L) { init(); return; }
-
-    const link = document.createElement("link");
-    link.rel  = "stylesheet";
-    link.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
-    document.head.appendChild(link);
-
-    const script    = document.createElement("script");
-    script.src      = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
-    script.onload   = init;
-    document.head.appendChild(script);
+    void import("leaflet").then(init).catch(() => undefined);
 
     return () => {
+      canceled = true;
       if (leafletRef.current) { leafletRef.current.remove(); leafletRef.current = null; }
     };
   }, [mapResults]);
@@ -1285,7 +1265,7 @@ function AuraFeaturesGrid({ items }: { items: BentoItem[] }) {
 
   const statusColor = (s: string) => {
     if (s === "Live" || s === "Online") return "bg-amber-950/60 text-amber-400/80 border-amber-900/30";
-    if (s === "Secured") return "bg-purple-950/40 text-purple-400/70 border-purple-900/20";
+    if (s === "Protected") return "bg-purple-950/40 text-purple-400/70 border-purple-900/20";
     return "bg-blue-950/40 text-blue-400/70 border-blue-900/20";
   };
 
@@ -1462,8 +1442,8 @@ function StatsStrip() {
     { value: "847K+",  label: "Records Indexed"  },
     { value: "320+",   label: "ZIP Codes Covered" },
     { value: "<2s",    label: "Query Latency"     },
-    { value: "100%",   label: "Read-Only Secure"  },
-    { value: "GPT-4o", label: "AI Model"          },
+    { value: "Owner", label: "Private AI Access" },
+    { value: "GPT-4o-mini", label: "AI Model"     },
     { value: "24/7",   label: "Cluster Uptime"    },
   ];
 
@@ -1617,7 +1597,7 @@ export default function LandingPage() {
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({ question: q }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw new Error(res.status === 401 ? "Owner access required" : `HTTP ${res.status}`);
       const data = await res.json();
       const results: QueryResult[] = data.results ?? [];
       const answer:  string        = data.answer  ?? "";
@@ -1637,12 +1617,12 @@ export default function LandingPage() {
           setTimeout(() => document.getElementById("aura-map")?.scrollIntoView({ behavior: "smooth" }), 450);
         }
       }
-    } catch {
+    } catch (error) {
       setMessages((prev) =>
         prev.filter((m) => m.id !== lid).concat({
           id:      `e-${Date.now()}`,
           role:    "assistant",
-          answer:  "Query failed. The cluster may be warming up — please try again in a moment.",
+          answer: error instanceof Error && error.message === "Owner access required" ? "AI queries are private. Use Owner access above the terminal to unlock them." : "Query unavailable. Try a city, ZIP, or ranking question after unlocking Owner access.",
           results: [],
         })
       );
@@ -1771,17 +1751,17 @@ export default function LandingPage() {
             titleComponent={
               <div className="text-center px-4 space-y-3">
                 <span className="text-xs font-mono tracking-[0.3em] uppercase text-amber-400/60">
-                  Powered by Databricks + GPT-4o
+                  Powered by Databricks + GPT-4o-mini
                 </span>
                 <h2 className="text-4xl md:text-5xl font-bold text-white mt-3 tracking-tight leading-tight">
-                  Ask anything about
+                  Ask questions about
                   <br />
                   <span className="bg-clip-text text-transparent bg-gradient-to-r from-amber-300 to-orange-400">
                     Phoenix safety data
                   </span>
                 </h2>
                 <p className="text-sm text-white/40 font-mono mt-4 max-w-xl mx-auto">
-                  Natural language → SQL → structured results in under 2 seconds
+                  Natural language → validated plan → ranked results
                 </p>
               </div>
             }
@@ -1873,12 +1853,13 @@ export default function LandingPage() {
               <SectionLabel
                 tag="AI Interface"
                 title="Query Risk Data"
-                subtitle="Type a natural language question or use / commands to filter and compare Phoenix risk zones."
+                subtitle="Explore the public demo. AI queries are available through private Owner access."
               />
             </div>
           </div>
 
           <div className="relative pb-16" id="terminal">
+            <OwnerAccess />
             <QueryTerminal
               messages={messages}
               loading={loading}
@@ -1950,8 +1931,8 @@ export default function LandingPage() {
           />
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {[
-              { icon: MessageSquare, title: "AI Engine",  color: "text-amber-400",  desc: "GPT-4o converts natural language to precise SQL queries with deep urban risk context baked in."              },
-              { icon: Database,      title: "Databricks", color: "text-blue-400",   desc: "Scalable cloud compute cluster processing 847K+ records in milliseconds with zero write access."          },
+              { icon: MessageSquare, title: "AI Engine",  color: "text-amber-400",  desc: "GPT-4o-mini proposes structured intent. The server validates it and owns every SQL template and parameter." },
+              { icon: Database,      title: "Databricks", color: "text-blue-400",   desc: "Six approved urban datasets served through bounded queries, with named parameters and up to 20 results." },
               { icon: BarChart3,     title: "Risk Index", color: "text-orange-400", desc: "Normalized 0-100 priority score combining crime density, population, and social vulnerability data." },
             ].map((item, i) => (
               <ScrollReveal key={item.title} delay={i * 0.09}>
@@ -1971,9 +1952,9 @@ export default function LandingPage() {
             <div className="mt-6 grid grid-cols-2 md:grid-cols-3 gap-3">
               {[
                 { Icon: Zap,     label: "Processing",  value: "Instant"    },
-                { Icon: Shield,  label: "Security",    value: "SELECT-Only"},
+                { Icon: Shield,  label: "Security",    value: "Owner-only" },
                 { Icon: Network, label: "Integration", value: "GPT-4o"     },
-                { Icon: Lock,    label: "Guardrails",  value: "Enforced"   },
+                { Icon: Lock,    label: "Guardrails",  value: "Templates"  },
                 { Icon: Cpu,     label: "Cluster",     value: "Databricks" },
                 { Icon: Search,  label: "Records",     value: "847K+"      },
               ].map(({ Icon, label, value }) => (
@@ -2196,8 +2177,8 @@ export default function LandingPage() {
                 app? what app?
               </h3>
               <p className="text-white/40 text-sm font-mono leading-relaxed mb-5">
-                we lied. there's no app yet.<br />
-                we're building it, we promise 🤞<br />
+                we lied. there&apos;s no app yet.<br />
+                we&apos;re building it, we promise 🤞<br />
                 (probably)
               </p>
 

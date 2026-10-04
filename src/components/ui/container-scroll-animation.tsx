@@ -1,6 +1,14 @@
 "use client";
-import React, { useRef } from "react";
+import React, { useRef, useSyncExternalStore } from "react";
 import { useScroll, useTransform, motion, MotionValue } from "motion/react";
+
+function subscribeMobile(onChange: () => void) {
+  const query = window.matchMedia("(max-width: 768px)");
+  query.addEventListener("change", onChange);
+  return () => query.removeEventListener("change", onChange);
+}
+const mobileSnapshot = () => window.matchMedia("(max-width: 768px)").matches;
+const serverSnapshot = () => false;
 
 export const ContainerScroll = ({
   titleComponent,
@@ -11,18 +19,7 @@ export const ContainerScroll = ({
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const { scrollYProgress } = useScroll({ target: containerRef });
-  const [isMobile, setIsMobile] = React.useState(false);
-
-  React.useEffect(() => {
-    const checkMobile = () => {
-      setIsMobile(window.innerWidth <= 768);
-    };
-    checkMobile();
-    window.addEventListener("resize", checkMobile);
-    return () => {
-      window.removeEventListener("resize", checkMobile);
-    };
-  }, []);
+  const isMobile = useSyncExternalStore(subscribeMobile, mobileSnapshot, serverSnapshot);
 
   const scaleDimensions = () => {
     return isMobile ? [0.7, 0.9] : [1.05, 1];
@@ -50,7 +47,7 @@ export const ContainerScroll = ({
   );
 };
 
-export const Header = ({ translate, titleComponent }: any) => {
+export const Header = ({ translate, titleComponent }: { translate: MotionValue<number>; titleComponent: React.ReactNode }) => {
   return (
     <motion.div
       style={{ translateY: translate }}

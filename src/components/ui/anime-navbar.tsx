@@ -1,6 +1,6 @@
 "use client"
 
-import React, { useEffect, useState } from "react"
+import React, { useState, useSyncExternalStore } from "react"
 import { motion, AnimatePresence } from "motion/react"
 import Link from "next/link"
 import { LucideIcon } from "lucide-react"
@@ -19,29 +19,19 @@ interface NavBarProps {
   defaultActive?: string
 }
 
+const subscribeMounted = () => () => {};
+const mountedSnapshot = () => true;
+const serverSnapshot = () => false;
+
 export function AnimeNavBar({ items, className, defaultActive = "Home" }: NavBarProps) {
-  const [mounted, setMounted] = useState(false)
+  const mounted = useSyncExternalStore(subscribeMounted, mountedSnapshot, serverSnapshot)
   const [hoveredTab, setHoveredTab] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<string>(defaultActive)
-  const [isMobile, setIsMobile] = useState(false)
-
-  useEffect(() => {
-    setMounted(true)
-  }, [])
-
-  useEffect(() => {
-    const handleResize = () => {
-      setIsMobile(window.innerWidth < 768)
-    }
-    handleResize()
-    window.addEventListener("resize", handleResize)
-    return () => window.removeEventListener("resize", handleResize)
-  }, [])
 
   if (!mounted) return null
 
   return (
-    <div className="fixed top-5 left-0 right-0 z-[9999]">
+    <div className={cn("fixed top-5 left-0 right-0 z-[9999]", className)}>
       <div className="flex justify-center pt-6">
         <motion.div
           className="flex items-center gap-1 bg-black/60 border border-amber-900/30 backdrop-blur-lg py-2 px-2 rounded-full shadow-lg shadow-amber-950/20 relative"

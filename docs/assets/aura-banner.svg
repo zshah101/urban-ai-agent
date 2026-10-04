@@ -65,8 +65,8 @@
     </g>
     <g transform="translate(1040,150)">
       <circle cx="0" cy="-4" r="4" fill="#f59e0b"/>
-      <text x="14" y="0" fill="#f4f4f5" font-weight="700">SELECT-only</text>
-      <text x="14" y="18" fill="#8a8278" font-size="12">zero write risk</text>
+      <text x="14" y="0" fill="#f4f4f5" font-weight="700">Fixed SELECT</text>
+      <text x="14" y="18" fill="#8a8278" font-size="12">owner-only AI</text>
     </g>
     <g transform="translate(1058,260)">
       <circle cx="0" cy="-4" r="4" fill="#f59e0b"/>
